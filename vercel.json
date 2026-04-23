@@ -1,1 +1,1 @@
-{"functions":{"api/webhook.py":{"memory":128,"maxDuration":10}}}
+{"functions":{"api/index.py":{"memory":128,"maxDuration":10,"runtime":"python3.10"}}}
