@@ -2,6 +2,7 @@ from http.server import BaseHTTPRequestHandler
 import json
 import sys
 import os
+import traceback
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -38,20 +39,24 @@ class handler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get('Content-Length', 0))
         post_data = self.rfile.read(content_length) if content_length else b''
         
+        response_text = ""
         try:
             update_dict = json.loads(post_data.decode('utf-8'))
+            response_text = f"Got update: {json.dumps(update_dict)}"
             
-            # Telegram присылает update напрямую, не в массиве
-            if "update_id" in update_dict:
-                bot.process_new_updates([telebot_types.Update.de_json(update_dict)])
+            # Создаём Update из словаря
+            update = telebot_types.Update.de_json(update_dict)
+            bot.process_new_updates([update])
+            response_text += " | Processed OK"
             
         except Exception as e:
-            print(f"Error: {e}")
+            response_text = f"ERROR: {str(e)}\n{traceback.format_exc()}"
+            print(response_text)
         
         self.send_response(200)
         self.send_header('Content-type', 'application/json')
         self.end_headers()
-        self.wfile.write(json.dumps({"status": "ok"}).encode())
+        self.wfile.write(json.dumps({"status": "ok", "debug": response_text}).encode())
     
     def do_GET(self):
         self.send_response(200)
