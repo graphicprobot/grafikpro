@@ -5,19 +5,102 @@ import requests
 import traceback
 from datetime import datetime, timedelta
 import uuid
-import firebase_admin
-from firebase_admin import credentials, firestore
 
 TOKEN = "8269135710:AAE9mv55_QJOg3VN6U7JploC6KqigKBZf6Y"
 TELEGRAM_URL = f"https://api.telegram.org/bot{TOKEN}"
 
-# === FIREBASE ===
-cred = credentials.Certificate("firebase_key.json")
-firebase_admin.initialize_app(cred)
-db = firestore.client()
+# === FIRESTORE REST API ===
+FIRESTORE_URL = "https://firestore.googleapis.com/v1/projects/grafikpro-d3500/databases/(default)/documents"
+API_KEY = "AIzaSyAmP4IW-mcqhXT1L6s4vx5_Z7IZbi1YqI8"
+
+def firestore_get(collection, doc_id):
+    url = f"{FIRESTORE_URL}/{collection}/{doc_id}?key={API_KEY}"
+    r = requests.get(url)
+    if r.status_code == 200:
+        data = r.json()
+        fields = data.get("fields", {})
+        result = {}
+        for key, value in fields.items():
+            if "stringValue" in value:
+                result[key] = value["stringValue"]
+            elif "arrayValue" in value:
+                result[key] = [item.get("stringValue", "") for item in value.get("values", [])]
+            elif "integerValue" in value:
+                result[key] = int(value["integerValue"])
+            elif "booleanValue" in value:
+                result[key] = value["booleanValue"]
+        return result
+    return None
+
+def firestore_set(collection, doc_id, data):
+    url = f"{FIRESTORE_URL}/{collection}/{doc_id}?key={API_KEY}"
+    fields = {}
+    for key, val in data.items():
+        if isinstance(val, str):
+            fields[key] = {"stringValue": val}
+        elif isinstance(val, list):
+            fields[key] = {"arrayValue": {"values": [{"stringValue": item} for item in val]}}
+        elif isinstance(val, bool):
+            fields[key] = {"booleanValue": val}
+        elif isinstance(val, int):
+            fields[key] = {"integerValue": val}
+    body = {"fields": fields}
+    r = requests.patch(url, json=body)
+    return r.status_code == 200
+
+def firestore_update(collection, doc_id, data):
+    return firestore_set(collection, doc_id, data)
+
+def firestore_query(collection, field, operator, value):
+    url = f"{FIRESTORE_URL}/{collection}?key={API_KEY}"
+    body = {
+        "structuredQuery": {
+            "from": [{"collectionId": collection}],
+            "where": {
+                "fieldFilter": {
+                    "field": {"fieldPath": field},
+                    "op": operator,
+                    "value": {"stringValue": value}
+                }
+            }
+        }
+    }
+    r = requests.post(url, json=body)
+    results = []
+    if r.status_code == 200:
+        for doc in r.json().get("documents", []):
+            doc_data = {}
+            fields = doc.get("fields", {})
+            for key, val in fields.items():
+                if "stringValue" in val:
+                    doc_data[key] = val["stringValue"]
+                elif "arrayValue" in val:
+                    doc_data[key] = [item.get("stringValue", "") for item in val.get("values", [])]
+            # Извлекаем ID документа из имени
+            doc_name = doc.get("name", "")
+            doc_id = doc_name.split("/")[-1] if doc_name else ""
+            doc_data["_id"] = doc_id
+            results.append(doc_data)
+    return results
+
+def firestore_add(collection, data):
+    url = f"{FIRESTORE_URL}/{collection}?key={API_KEY}"
+    fields = {}
+    for key, val in data.items():
+        if isinstance(val, str):
+            fields[key] = {"stringValue": val}
+        elif isinstance(val, list):
+            fields[key] = {"arrayValue": {"values": [{"stringValue": item} for item in val]}}
+        elif isinstance(val, bool):
+            fields[key] = {"booleanValue": val}
+        elif isinstance(val, int):
+            fields[key] = {"integerValue": val}
+    body = {"fields": fields}
+    r = requests.post(url, json=body)
+    return r.status_code == 200
 
 # === API Telegram ===
-def send_message(chat_id, text, reply_markup=None, parse_mode="Markdown"):
+def send_message(chat_id, text, reply_markup=None, parse_mode=None):
     payload = {"chat_id": chat_id, "text": text}
     if reply_markup:
         payload["reply_markup"] = json.dumps(reply_markup)
@@ -58,63 +141,57 @@ STATES = {}
 
 # === ОСНОВНЫЕ ФУНКЦИИ ===
 def handle_start(chat_id, user_name):
-    master_ref = db.collection("masters").document(str(chat_id))
-    master = master_ref.get()
+    master = firestore_get("masters", str(chat_id))
     
-    if master.exists:
+    if master:
         send_message(chat_id, f"С возвращением, мастер {user_name}!", reply_markup=master_menu())
     else:
         keyboard = {
             "keyboard": [["👤 Я мастер", "👥 Я клиент"]],
             "resize_keyboard": True
         }
-        send_message(chat_id, "👋 Добро пожаловать в *График.Про*!\n\nЯ помогу записывать клиентов и не терять деньги.\n\n*Кто вы?*", reply_markup=keyboard)
+        send_message(chat_id, "👋 Добро пожаловать в *График.Про*!\n\nКто вы?", reply_markup=keyboard)
 
 def handle_master_registration(chat_id, user_name, username):
-    master_ref = db.collection("masters").document(str(chat_id))
-    if not master_ref.get().exists:
-        master_ref.set({
+    master = firestore_get("masters", str(chat_id))
+    if not master:
+        firestore_set("masters", str(chat_id), {
             "name": user_name,
             "username": username,
             "services": [],
             "created_at": datetime.now().isoformat()
         })
-    send_message(chat_id, "✅ Вы зарегистрированы как мастер!\n🔗 Нажмите *«Моя ссылка»* в меню.", reply_markup=master_menu())
+    send_message(chat_id, "✅ Вы зарегистрированы как мастер!", reply_markup=master_menu())
 
 def handle_master_link(chat_id):
-    master_ref = db.collection("masters").document(str(chat_id))
-    master = master_ref.get()
-    if not master.exists:
+    master = firestore_get("masters", str(chat_id))
+    if not master:
         send_message(chat_id, "Сначала зарегистрируйтесь как мастер.")
         return
     
-    links_ref = db.collection("links").where("master_id", "==", str(chat_id)).limit(1)
-    links = links_ref.get()
+    links = firestore_query("links", "master_id", "EQUAL", str(chat_id))
     
-    if len(links) > 0:
-        link_id = links[0].id
+    if links:
+        link_id = links[0]["_id"]
     else:
         link_id = str(uuid.uuid4())[:8]
-        db.collection("links").document(link_id).set({
+        firestore_set("links", link_id, {
             "master_id": str(chat_id),
             "created_at": datetime.now().isoformat()
         })
     
-    bot_username = "grafikpro_bot"
-    deeplink = f"https://t.me/{bot_username}?start=master_{link_id}"
-    send_message(chat_id, f"🔗 *Ваша ссылка для клиентов:*\n\n`{deeplink}`\n\n📨 Отправьте её клиенту.", parse_mode="Markdown")
+    deeplink = f"https://t.me/grafikpro_bot?start=master_{link_id}"
+    send_message(chat_id, f"🔗 *Ваша ссылка:*\n\n`{deeplink}`", parse_mode="Markdown")
 
 def handle_client_start_from_link(chat_id, link_id):
-    link_ref = db.collection("links").document(link_id)
-    link = link_ref.get()
-    if not link.exists:
+    link = firestore_get("links", link_id)
+    if not link:
         send_message(chat_id, "❌ Ссылка недействительна.")
         return
     
     master_id = link.get("master_id")
-    master_ref = db.collection("masters").document(master_id)
-    master = master_ref.get()
-    if not master.exists:
+    master = firestore_get("masters", master_id)
+    if not master:
         send_message(chat_id, "❌ Мастер не найден.")
         return
     
@@ -123,7 +200,7 @@ def handle_client_start_from_link(chat_id, link_id):
         send_message(chat_id, "❌ У мастера пока нет услуг.")
         return
     
-    text = f"📝 *Запись к {master.get('name')}*\n\nВыберите услугу:"
+    text = f"📝 *Запись к {master.get('name')}*\nВыберите услугу:"
     buttons = [[{"text": s, "callback_data": f"client_service_{link_id}_{s}"}] for s in services]
     send_message(chat_id, text, reply_markup={"inline_keyboard": buttons})
 
@@ -131,18 +208,17 @@ def handle_client_service_select(chat_id, link_id, service_name):
     tomorrow = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
     time_slots = ["09:00", "11:00", "13:00", "15:00", "17:00"]
     
-    text = f"📅 *Выберите время:*\nУслуга: *{service_name}*\nДата: *{tomorrow}*"
+    text = f"📅 *Выберите время:*\n{service_name} | {tomorrow}"
     buttons = [[{"text": t, "callback_data": f"client_time_{link_id}_{service_name}_{tomorrow}_{t}"}] for t in time_slots]
     send_message(chat_id, text, reply_markup={"inline_keyboard": buttons})
 
 def handle_client_time_select(chat_id, link_id, service_name, date, time):
-    link_ref = db.collection("links").document(link_id)
-    link = link_ref.get()
+    link = firestore_get("links", link_id)
     master_id = link.get("master_id")
-    master = db.collection("masters").document(master_id).get()
-    master_name = master.get("name", "Мастер")
+    master = firestore_get("masters", master_id)
+    master_name = master.get("name", "Мастер") if master else "Мастер"
     
-    db.collection("appointments").add({
+    firestore_add("appointments", {
         "master_id": master_id,
         "client_id": str(chat_id),
         "service": service_name,
@@ -152,15 +228,15 @@ def handle_client_time_select(chat_id, link_id, service_name, date, time):
         "created_at": datetime.now().isoformat()
     })
     
-    send_message(chat_id, f"✅ *Запись подтверждена!*\n\nМастер: *{master_name}*\nУслуга: *{service_name}*\nДата: *{date}*\nВремя: *{time}*\n\n📌 Мы напомним вам за час до записи.")
-    send_message(int(master_id), f"🔔 *Новая запись!*\n\nКлиент записался на *{service_name}*\nДата: *{date}* в *{time}*")
+    send_message(chat_id, f"✅ *Запись подтверждена!*\n\n{master_name}\n{service_name}\n{date} в {time}")
+    send_message(int(master_id), f"🔔 *Новая запись!*\n\n{service_name}\n{date} в {time}")
 
 def handle_settings_services(chat_id):
-    master = db.collection("masters").document(str(chat_id)).get()
-    if not master.exists:
+    master = firestore_get("masters", str(chat_id))
+    if not master:
         return
     services = master.get("services", [])
-    text = "💈 *Ваши услуги:*\nНажмите на услугу, чтобы удалить." if services else "💈 У вас пока нет услуг."
+    text = "💈 *Ваши услуги:*" if services else "💈 Услуг пока нет."
     send_message(chat_id, text, reply_markup=services_inline(services))
 
 def handle_add_service_prompt(chat_id):
@@ -169,24 +245,22 @@ def handle_add_service_prompt(chat_id):
     send_message(chat_id, "✏️ Введите название услуги:", reply_markup=keyboard)
 
 def handle_add_service_name(chat_id, service_name):
-    master_ref = db.collection("masters").document(str(chat_id))
-    master = master_ref.get()
-    if master.exists:
+    master = firestore_get("masters", str(chat_id))
+    if master:
         services = master.get("services", [])
         services.append(service_name)
-        master_ref.update({"services": services})
+        firestore_update("masters", str(chat_id), {"services": services})
     
     STATES.pop(str(chat_id), None)
-    send_message(chat_id, f"✅ Услуга *«{service_name}»* добавлена!", reply_markup=settings_menu())
+    send_message(chat_id, f"✅ *«{service_name}»* добавлена!", reply_markup=settings_menu())
     handle_settings_services(chat_id)
 
 def handle_delete_service(chat_id, service_name):
-    master_ref = db.collection("masters").document(str(chat_id))
-    master = master_ref.get()
-    if master.exists:
+    master = firestore_get("masters", str(chat_id))
+    if master:
         services = master.get("services", [])
         services = [s for s in services if s != service_name]
-        master_ref.update({"services": services})
+        firestore_update("masters", str(chat_id), {"services": services})
     handle_settings_services(chat_id)
 
 def handle_text(chat_id, user_name, username, text):
@@ -214,10 +288,6 @@ def handle_text(chat_id, user_name, username, text):
         handle_master_link(chat_id)
     elif text == "📅 Моё расписание":
         send_message(chat_id, "📭 Записей пока нет.")
-    elif text == "👥 Клиенты":
-        send_message(chat_id, "👥 Пока пусто.")
-    elif text == "📊 Статистика":
-        send_message(chat_id, "📊 Ждем первых записей.")
     else:
         send_message(chat_id, "Используйте меню.", reply_markup=master_menu())
 
