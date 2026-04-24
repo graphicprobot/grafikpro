@@ -478,7 +478,7 @@ def handle_add_service_duration(chat_id, dur_text):
     firestore_set("masters", str(chat_id), {"services": services})
     STATES.pop(str(chat_id), None)
     # Онбординг
-    if not master.get("completed_onboarding"):
+        if master and not master.get("completed_onboarding"):
         firestore_set("masters", str(chat_id), {"completed_onboarding": True})
         send_message(chat_id, f"✅ *Отлично!*\n\nТеперь настрой часы работы: /start → ⚙️ Настройки → ⏰ Часы", reply_markup=master_menu())
     else:
