@@ -161,7 +161,14 @@ def handle_start(chat_id, user_name):
         send_message(chat_id, "👋 *График.Про*\n\nКто вы?", reply_markup={"keyboard": [["👤 Я мастер"], ["👥 Я клиент"]], "resize_keyboard": True})
 
 def handle_master_registration(chat_id, user_name, username):
-    firestore_set("masters", str(chat_id), {"name": user_name, "username": username, "services": [], "schedule": {"start": "09:00", "end": "18:00"}, "completed_onboarding": False, "created_at": datetime.now().isoformat()})
+    firestore_set("masters", str(chat_id), {
+        "name": user_name,
+        "username": username,
+        "services": [],
+        "schedule": {"start": "09:00", "end": "18:00"},
+        "completed_onboarding": False,
+        "created_at": datetime.now().isoformat()
+    })
     send_message(chat_id, f"✅ {user_name}, добро пожаловать!")
     start_onboarding(chat_id)
 
