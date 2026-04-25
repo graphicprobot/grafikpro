@@ -611,7 +611,7 @@ def handle_auto_reply(chat_id, text):
     return False
 
 # === ШАБЛОНЫ ЧАСОВ ===
-def handle_schedule_settings(chat_id):
+(chat_id):
     master = firestore_get("masters", str(chat_id))
     if not master: return send_message(chat_id, "Сначала зарегистрируйтесь.")
     schedule = master.get("schedule", {})
@@ -627,10 +627,28 @@ def handle_schedule_settings(chat_id):
     STATES[str(chat_id)] = {"state": "setting_day_schedule"}
     send_message(chat_id, text, reply_markup={"keyboard": [["🔙 Отмена"]], "resize_keyboard": True})
 
+def handle_schedule_settings(chat_id):
+    master = firestore_get("masters", str(chat_id))
+    if not master: return send_message(chat_id, "Сначала зарегистрируйтесь.")
+    schedule = master.get("schedule", {})
+    days = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]
+    day_names = ["ПН","ВТ","СР","ЧТ","ПТ","СБ","ВС"]
+    text = "⏰ *Часы работы:*\n"
+    for i, d in enumerate(days):
+        s = schedule.get(d)
+        if s is None:
+            text += f"{day_names[i]}: выходной\n"
+        elif isinstance(s, dict) and s.get("start") and s.get("end"):
+            text += f"{day_names[i]}: {s['start']} – {s['end']}\n"
+        else:
+            text += f"{day_names[i]}: выходной\n"
+    text += "\nИзменить: `ПН 09:00-18:00` или `ВС выходной`\nСкопировать: `ПН → ВТ,СР,ЧТ,ПТ`"
+    STATES[str(chat_id)] = {"state": "setting_day_schedule"}
+    send_message(chat_id, text, reply_markup={"keyboard": [["🔙 Отмена"]], "resize_keyboard": True})
+
 def handle_day_schedule_set(chat_id, text):
     days_map = {"ПН":"monday","ВТ":"tuesday","СР":"wednesday","ЧТ":"thursday","ПТ":"friday","СБ":"saturday","ВС":"sunday"}
     try:
-        # Копирование дня
         if "→" in text:
             src, dst = text.split("→")
             src_key = days_map.get(src.strip().upper())
@@ -643,29 +661,51 @@ def handle_day_schedule_set(chat_id, text):
             if src_sched is None:
                 return send_message(chat_id, f"❌ {src.strip()} — выходной, нечего копировать.")
             for dk in dst_keys:
-                schedule[dk] = dict(src_sched)
-            firestore_set("masters", str(chat_id), {"schedule": schedule})
+                schedule[dk] = {"start": src_sched["start"], "end": src_sched["end"]}
+            # Сохраняем через PATCH с updateMask
+            url = f"{FIRESTORE_URL}/masters/{chat_id}?key={API_KEY}"
+            fields = {}
+            for dk in dst_keys:
+                fields[dk] = {"mapValue": {"fields": {"start": {"stringValue": schedule[dk]["start"]}, "end": {"stringValue": schedule[dk]["end"]}}}}
+            body = {"fields": {f"schedule": {"mapValue": {"fields": fields}}}}
+            requests.patch(url, json=body)
             STATES.pop(str(chat_id), None)
             return send_message(chat_id, f"✅ {src.strip()} скопирован на {dst.strip()}!", reply_markup=settings_menu())
         
-        # Обычное изменение
         parts = text.strip().split()
+        if len(parts) < 2:
+            return send_message(chat_id, "❌ Формат: ПН 09:00-18:00")
         day_code = parts[0].upper()
         day_key = days_map.get(day_code)
-        if not day_key: return send_message(chat_id, "❌ Неверный день.")
+        if not day_key:
+            return send_message(chat_id, "❌ Неверный день.")
         time_part = " ".join(parts[1:])
         master = firestore_get("masters", str(chat_id))
         schedule = master.get("schedule", {})
         if time_part.lower() == "выходной":
             schedule[day_key] = None
         else:
+            if "-" not in time_part:
+                return send_message(chat_id, "❌ Формат: 09:00-18:00")
             start, end = time_part.split("-")
             schedule[day_key] = {"start": start.strip(), "end": end.strip()}
-        firestore_set("masters", str(chat_id), {"schedule": schedule})
+        
+        # Сохраняем schedule целиком
+        url = f"{FIRESTORE_URL}/masters/{chat_id}?key={API_KEY}"
+        map_fields = {}
+        for dk, dv in schedule.items():
+            if dv is None:
+                map_fields[dk] = {"nullValue": None}
+            else:
+                map_fields[dk] = {"mapValue": {"fields": {"start": {"stringValue": dv["start"]}, "end": {"stringValue": dv["end"]}}}}
+        body = {"fields": {"schedule": {"mapValue": {"fields": map_fields}}}}
+        r = requests.patch(url, json=body)
+        
         STATES.pop(str(chat_id), None)
         send_message(chat_id, f"✅ {day_code} обновлён!", reply_markup=settings_menu())
     except Exception as e:
-        send_message(chat_id, "❌ Формат: ПН 09:00-18:00 или ПН → ВТ,СР,ЧТ")
+        print(f"Schedule error: {e}")
+        send_message(chat_id, "❌ Ошибка. Формат: ПН 09:00-18:00")
 
 # === ХЭНДЛЕР ТЕКСТА (с автоответами и поиском) ===
 def handle_text(chat_id, user_name, username, text):
