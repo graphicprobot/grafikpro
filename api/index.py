@@ -1,6 +1,6 @@
 """
-Мастерилка — бот для записи клиентов
-Версия: 3.2.5 (подтверждение записи + улучшения UX)
+График.Про — бот для записи клиентов
+Версия: 3.2.6 (часовые пояса)
 """
 
 import os
@@ -24,6 +24,14 @@ FIRESTORE_URL = f"https://firestore.googleapis.com/v1/projects/{PROJECT_ID}/data
 DAYS_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 DAYS_SHORT = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
+# Часовые пояса
+TIMEZONES = {
+    "-1": "Калининград (UTC-1)", "0": "Москва (UTC+0)", "1": "Самара (UTC+1)",
+    "2": "Екатеринбург (UTC+2)", "3": "Омск (UTC+3)", "4": "Красноярск (UTC+4)",
+    "5": "Иркутск (UTC+5)", "6": "Якутск (UTC+6)", "7": "Владивосток (UTC+7)",
+    "8": "Магадан (UTC+8)", "9": "Камчатка (UTC+9)"
+}
+
 def now():
     return datetime.now()
 
@@ -43,6 +51,17 @@ def format_time(minutes):
 def validate_phone(phone):
     clean = re.sub(r'[^0-9+]', '', phone)
     return clean if len(clean) >= 10 else None
+
+def get_local_time(chat_id):
+    """Возвращает локальное время для пользователя с учётом часового пояса"""
+    master = DB.get("masters", str(chat_id))
+    client = DB.get("clients", str(chat_id))
+    tz_offset = 0
+    if master and master.get("timezone"):
+        tz_offset = master["timezone"]
+    elif client and client.get("timezone"):
+        tz_offset = client["timezone"]
+    return datetime.now() + timedelta(hours=tz_offset)
 
 class DB:
     @staticmethod
@@ -199,7 +218,7 @@ class KBD:
     
     @staticmethod
     def settings():
-        return {"keyboard": [["💈 Услуги", "⏰ Часы работы"], ["📍 Адрес", "🚷 Чёрный список"], ["📢 Свободные окна", "🖼 Портфолио"], ["🔙 В меню"]], "resize_keyboard": True}
+        return {"keyboard": [["💈 Услуги", "⏰ Часы работы"], ["📍 Адрес", "🚷 Чёрный список"], ["🕐 Часовой пояс", "📢 Свободные окна"], ["🖼 Портфолио", "🔙 В меню"]], "resize_keyboard": True}
     
     @staticmethod
     def cancel():
@@ -287,7 +306,7 @@ def handle_start(chat_id, user_name):
         TG.send(chat_id, f"👋 {user_name}!", reply_markup=KBD.client_main())
     else:
         TG.send(chat_id, 
-            "💈 *Мастерилка — твой личный администратор*\n\n"
+            "💈 *График.Про — твой личный администратор*\n\n"
             "📅 *Клиенты записываются сами* — ты только принимаешь\n"
             "⏰ *Напоминания за 24, 3 и 1 час* — неявки сократятся в 2 раза\n"
             "⭐ *Рейтинг и портфолио* — клиенты видят твои работы и оценки\n"
@@ -301,8 +320,8 @@ def register_master(chat_id, user_name, username):
         if d == "sunday": sched[d] = None
         elif d == "saturday": sched[d] = {"start": "10:00", "end": "15:00"}
         else: sched[d] = {"start": "09:00", "end": "18:00"}
-    DB.set("masters", str(chat_id), {"name": user_name, "username": username or "", "phone": "", "services": [], "schedule": sched, "breaks": [], "address": "", "portfolio": [], "blacklist": [], "client_notes": {}, "client_tags": {}, "completed_onboarding": False, "onboarding_step": 1, "buffer": 5, "rating": 0, "ratings_count": 0, "created_at": now().isoformat()})
-    TG.send(chat_id, f"✅ *{user_name}, добро пожаловать в Мастерилку!*\nСейчас настроим профиль.", reply_markup=KBD.cancel())
+    DB.set("masters", str(chat_id), {"name": user_name, "username": username or "", "phone": "", "timezone": 0, "services": [], "schedule": sched, "breaks": [], "address": "", "portfolio": [], "blacklist": [], "client_notes": {}, "client_tags": {}, "completed_onboarding": False, "onboarding_step": 1, "buffer": 5, "rating": 0, "ratings_count": 0, "created_at": now().isoformat()})
+    TG.send(chat_id, f"✅ *{user_name}, добро пожаловать в График.Про!*\nСейчас настроим профиль.", reply_markup=KBD.cancel())
     start_onboarding(chat_id)
 
 def start_onboarding(chat_id):
@@ -343,7 +362,23 @@ def show_master_link(chat_id):
     links = DB.query("links", "master_id", "EQUAL", str(chat_id))
     link_id = links[0]["_id"] if links else str(uuid.uuid4())[:8]
     if not links: DB.set("links", link_id, {"master_id": str(chat_id)})
-    TG.send(chat_id, f"🔗 *Ваша ссылка:*\n`https://t.me/MasterilkaBot?start=master_{link_id}`")
+    TG.send(chat_id, f"🔗 *Ваша ссылка:*\n`https://t.me/grafikpro_bot?start=master_{link_id}`")
+
+def show_timezone_settings(chat_id):
+    master = DB.get("masters", str(chat_id))
+    if not master: return TG.send(chat_id, "❌ Мастер не найден.")
+    current_tz = master.get("timezone", 0)
+    current_name = TIMEZONES.get(str(current_tz), f"UTC+{current_tz}")
+    buttons = []
+    for offset, name in TIMEZONES.items():
+        prefix = "✅ " if str(current_tz) == offset else ""
+        buttons.append([{"text": f"{prefix}{name}", "callback_data": f"settz_{offset}"}])
+    buttons.append([{"text": "🔙 Назад", "callback_data": "settings_back"}])
+    TG.send(chat_id, f"🕐 *Часовой пояс*\n\nСейчас: {current_name}\n\nВыберите ваш регион:", reply_markup={"inline_keyboard": buttons})
+
+def handle_set_timezone(chat_id, offset):
+    DB.set("masters", str(chat_id), {"timezone": int(offset)})
+    TG.send(chat_id, f"✅ Часовой пояс: {TIMEZONES.get(offset, 'UTC+'+offset)}", reply_markup=KBD.settings())
 
 def start_add_service(chat_id):
     States.set(chat_id, {"state": "adding_service_name"})
@@ -576,18 +611,6 @@ def handle_booking_phone(chat_id, phone):
     if s.get("master_addr"): cf += f"\n📍 {s['master_addr']}"
     TG.send(chat_id, cf + f"\n\n📞 {phone}", reply_markup=KBD.client_main())
     TG.send(int(mid), f"🔔 *Новая запись!*\n👤 {s['client_name']}\n📞 {phone}\n💈 {s['service']}\n📅 {s['date']} в {s['time']}", reply_markup={"inline_keyboard": [[{"text": "👤 Клиент", "callback_data": f"client_card_{phone}"}], [{"text": "📅 Расписание", "callback_data": "schedule_filter_today"}]]})
-
-def handle_client_booking_by_link(chat_id):
-    States.set(chat_id, {"state": "entering_master_link"})
-    TG.send(chat_id, "🔗 *Вставьте ссылку мастера:*\n\nНапример: `https://t.me/MasterilkaBot?start=master_abc123`", reply_markup=KBD.cancel())
-
-def handle_enter_master_link(chat_id, text):
-    if "master_" in text:
-        link_id = text.split("master_")[1].split()[0].split("?")[0]
-        States.clear(chat_id)
-        handle_client_booking_start(chat_id, link_id)
-    else:
-        TG.send(chat_id, "❌ Неверная ссылка. Попробуйте ещё раз или нажмите Отмена.", reply_markup=KBD.cancel())
 
 def start_manual_booking(chat_id):
     States.set(chat_id, {"state": "manual_name"})
@@ -832,7 +855,7 @@ def handle_share_link(chat_id):
     links = DB.query("links", "master_id", "EQUAL", master_id)
     link_id = links[0]["_id"] if links else str(uuid.uuid4())[:8]
     if not links: DB.set("links", link_id, {"master_id": master_id})
-    link = f"https://t.me/MasterilkaBot?start=master_{link_id}"
+    link = f"https://t.me/grafikpro_bot?start=master_{link_id}"
     TG.send(chat_id, f"📤 *Поделитесь ссылкой на мастера:*\n\n`{link}`\n\nОтправьте другу!")
 
 def handle_text(chat_id, user_name, username, text):
@@ -895,7 +918,7 @@ def handle_text(chat_id, user_name, username, text):
     if text == "👥 Я клиент":
         if not client: DB.set("clients", str(chat_id), {"created_at": now().isoformat()})
         return TG.send(chat_id, 
-            "👥 *Добро пожаловать в Мастерилку!*\n\n"
+            "👥 *Добро пожаловать в График.Про!*\n\n"
             "🔗 *Запишитесь к мастеру в 3 клика* — по ссылке или номеру телефона\n"
             "📋 *Все ваши записи всегда под рукой*\n"
             "⭐ *Оценивайте работу мастера* — помогайте другим выбирать лучших\n\n"
@@ -924,12 +947,25 @@ def handle_text(chat_id, user_name, username, text):
     if text == "⏰ Часы работы" and master: return TG.send(chat_id, "⏰ *Часы*", reply_markup=KBD.days_schedule(master))
     if text == "📍 Адрес" and master: return start_set_address(chat_id)
     if text == "🚷 Чёрный список" and master: return show_blacklist(chat_id)
+    if text == "🕐 Часовой пояс" and master: return show_timezone_settings(chat_id)
     if text == "📢 Свободные окна" and master: return show_free_slots(chat_id)
     if text == "🖼 Портфолио" and master: States.set(chat_id, {"state": "adding_portfolio"}); return TG.send(chat_id, "🖼 Отправьте фото.")
     if text == "🔙 В меню" and master: States.clear(chat_id); return TG.send(chat_id, "Главное меню", reply_markup=KBD.master_main())
     if text == "📋 Мои записи": return handle_client_appointments(chat_id)
     if text == "🔍 Найти мастера": States.set(chat_id, {"state": "finding_master"}); return TG.send(chat_id, "🔍 Номер:", reply_markup=KBD.cancel())
     if text == "❓ Помощь": return TG.send(chat_id, "📖 *Помощь*\n\n📊 *Сегодня* — сводка\n📅 *Расписание* — записи\n➕ *Новая запись* — вручную\n👥 *Клиенты* — база\n🔗 *Моя ссылка* — клиентам\n⚙️ *Настройки* — услуги, часы\n🔄 *Я клиент/Я мастер* — сменить роль" if master else "📖 *Помощь*\n\n📋 *Мои записи*\n🔗 *Записаться по ссылке*\n📤 *Поделиться ссылкой*\n🔍 *Найти мастера*\n🔄 *Я мастер* — стать мастером")
+
+def handle_client_booking_by_link(chat_id):
+    States.set(chat_id, {"state": "entering_master_link"})
+    TG.send(chat_id, "🔗 *Вставьте ссылку мастера:*\n\nНапример: `https://t.me/grafikpro_bot?start=master_abc123`", reply_markup=KBD.cancel())
+
+def handle_enter_master_link(chat_id, text):
+    if "master_" in text:
+        link_id = text.split("master_")[1].split()[0].split("?")[0]
+        States.clear(chat_id)
+        handle_client_booking_start(chat_id, link_id)
+    else:
+        TG.send(chat_id, "❌ Неверная ссылка. Попробуйте ещё раз или нажмите Отмена.", reply_markup=KBD.cancel())
 
 def handle_callback(chat_id, data):
     if data == "onboarding_skip":
@@ -948,6 +984,7 @@ def handle_callback(chat_id, data):
     if data == "addservice": return start_add_service(chat_id)
     if data.startswith("delservice_"): return delete_service(chat_id, data.replace("delservice_",""))
     if data == "settings_back": States.clear(chat_id); return TG.send(chat_id, "⚙️ *Настройки*", reply_markup=KBD.settings())
+    if data.startswith("settz_"): return handle_set_timezone(chat_id, data.replace("settz_",""))
     if data == "add_blacklist": return start_add_blacklist(chat_id)
     if data.startswith("remove_blacklist_"): return handle_remove_blacklist(chat_id, data.replace("remove_blacklist_",""))
     if data == "setall_weekdays": return handle_set_all_weekdays(chat_id)
