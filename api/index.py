@@ -1,6 +1,6 @@
 """
-График.Про — бот для записи клиентов
-Версия: 3.2.1 (исправлена кнопка Отмена)
+Мастерилка — бот для записи клиентов
+Версия: 3.2.3 (новое название)
 """
 
 import os
@@ -286,7 +286,14 @@ def handle_start(chat_id, user_name):
     elif DB.get("clients", str(chat_id)):
         TG.send(chat_id, f"👋 {user_name}!", reply_markup=KBD.client_main())
     else:
-        TG.send(chat_id, "👋 *График.Про*\n\nКто вы?", reply_markup={"keyboard": [["👤 Я мастер"], ["👥 Я клиент"]], "resize_keyboard": True})
+        TG.send(chat_id, 
+            "💈 *Мастерилка — твой личный администратор*\n\n"
+            "📅 *Клиенты записываются сами* — ты только принимаешь\n"
+            "⏰ *Напоминания за 24, 3 и 1 час* — неявки сократятся в 2 раза\n"
+            "⭐ *Рейтинг и портфолио* — клиенты видят твои работы и оценки\n"
+            "💰 *Первые 30 записей бесплатно* — попробуй и убедись\n\n"
+            "*Кто вы?*",
+            reply_markup={"keyboard": [["👤 Я мастер"], ["👥 Я клиент"]], "resize_keyboard": True})
 
 def register_master(chat_id, user_name, username):
     sched = {}
@@ -295,7 +302,7 @@ def register_master(chat_id, user_name, username):
         elif d == "saturday": sched[d] = {"start": "10:00", "end": "15:00"}
         else: sched[d] = {"start": "09:00", "end": "18:00"}
     DB.set("masters", str(chat_id), {"name": user_name, "username": username or "", "phone": "", "services": [], "schedule": sched, "breaks": [], "address": "", "portfolio": [], "blacklist": [], "client_notes": {}, "client_tags": {}, "completed_onboarding": False, "onboarding_step": 1, "buffer": 5, "rating": 0, "ratings_count": 0, "created_at": now().isoformat()})
-    TG.send(chat_id, f"✅ *{user_name}, вы зарегистрированы!*\nСейчас настроим профиль.", reply_markup=KBD.cancel())
+    TG.send(chat_id, f"✅ *{user_name}, добро пожаловать в Мастерилку!*\nСейчас настроим профиль.", reply_markup=KBD.cancel())
     start_onboarding(chat_id)
 
 def start_onboarding(chat_id):
@@ -336,7 +343,7 @@ def show_master_link(chat_id):
     links = DB.query("links", "master_id", "EQUAL", str(chat_id))
     link_id = links[0]["_id"] if links else str(uuid.uuid4())[:8]
     if not links: DB.set("links", link_id, {"master_id": str(chat_id)})
-    TG.send(chat_id, f"🔗 *Ваша ссылка:*\n`https://t.me/GrafikProBot?start=master_{link_id}`")
+    TG.send(chat_id, f"🔗 *Ваша ссылка:*\n`https://t.me/MasterilkaBot?start=master_{link_id}`")
 
 def start_add_service(chat_id):
     States.set(chat_id, {"state": "adding_service_name"})
@@ -365,7 +372,7 @@ def handle_service_duration(chat_id, text):
     except:
         return TG.send(chat_id, "❌ От 1 до 480.")
     s = States.get(chat_id)
-    if not s: return TG.send(chat_id, "❌ Сессия истекла. Начните заново.", reply_markup=KBD.settings())
+    if not s: return TG.send(chat_id, "❌ Сессия истекла.", reply_markup=KBD.settings())
     return save_service(chat_id, s["svc_name"], s["svc_price"], d)
 
 def save_service(chat_id, name, price, duration):
@@ -552,7 +559,7 @@ def handle_booking_phone(chat_id, phone):
 
 def handle_client_booking_by_link(chat_id):
     States.set(chat_id, {"state": "entering_master_link"})
-    TG.send(chat_id, "🔗 *Вставьте ссылку мастера:*\n\nНапример: `https://t.me/GrafikProBot?start=master_abc123`", reply_markup=KBD.cancel())
+    TG.send(chat_id, "🔗 *Вставьте ссылку мастера:*\n\nНапример: `https://t.me/MasterilkaBot?start=master_abc123`", reply_markup=KBD.cancel())
 
 def handle_enter_master_link(chat_id, text):
     if "master_" in text:
@@ -805,7 +812,7 @@ def handle_share_link(chat_id):
     links = DB.query("links", "master_id", "EQUAL", master_id)
     link_id = links[0]["_id"] if links else str(uuid.uuid4())[:8]
     if not links: DB.set("links", link_id, {"master_id": master_id})
-    link = f"https://t.me/GrafikProBot?start=master_{link_id}"
+    link = f"https://t.me/MasterilkaBot?start=master_{link_id}"
     TG.send(chat_id, f"📤 *Поделитесь ссылкой на мастера:*\n\n`{link}`\n\nОтправьте другу!")
 
 def handle_text(chat_id, user_name, username, text):
@@ -813,7 +820,6 @@ def handle_text(chat_id, user_name, username, text):
     state = sd.get("state", "")
     master, client = DB.get("masters", str(chat_id)), DB.get("clients", str(chat_id))
     
-    # Проверка Отмены для всех состояний
     if text == "🔙 Отмена":
         States.clear(chat_id)
         return TG.send(chat_id, "❌ Отменено", reply_markup=KBD.master_main() if master else KBD.client_main())
@@ -859,7 +865,13 @@ def handle_text(chat_id, user_name, username, text):
     if text == "👤 Я мастер": return TG.send(chat_id, "Вы уже зарегистрированы!", reply_markup=KBD.master_main()) if master and master.get("completed_onboarding") else register_master(chat_id, user_name, username)
     if text == "👥 Я клиент":
         if not client: DB.set("clients", str(chat_id), {"created_at": now().isoformat()})
-        return TG.send(chat_id, "👥 *Клиентский кабинет*", reply_markup=KBD.client_main())
+        return TG.send(chat_id, 
+            "👥 *Добро пожаловать в Мастерилку!*\n\n"
+            "🔗 *Запишитесь к мастеру в 3 клика* — по ссылке или номеру телефона\n"
+            "📋 *Все ваши записи всегда под рукой*\n"
+            "⭐ *Оценивайте работу мастера* — помогайте другим выбирать лучших\n\n"
+            "*Выберите действие:*",
+            reply_markup=KBD.client_main())
     if text == "📊 Сегодня" and master:
         today = today_str()
         apps = DB.query("appointments", "master_id", "EQUAL", str(chat_id))
