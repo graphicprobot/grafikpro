@@ -1,6 +1,6 @@
 """
 График.Про — бот для записи клиентов
-Версия: 3.2.0 (стабильная)
+Версия: 3.2.1 (исправлена кнопка Отмена)
 """
 
 import os
@@ -813,6 +813,11 @@ def handle_text(chat_id, user_name, username, text):
     state = sd.get("state", "")
     master, client = DB.get("masters", str(chat_id)), DB.get("clients", str(chat_id))
     
+    # Проверка Отмены для всех состояний
+    if text == "🔙 Отмена":
+        States.clear(chat_id)
+        return TG.send(chat_id, "❌ Отменено", reply_markup=KBD.master_main() if master else KBD.client_main())
+    
     if state == "adding_service_name": return handle_service_name(chat_id, text)
     if state == "adding_service_price": return handle_service_price(chat_id, text)
     if state == "adding_service_duration": return handle_service_duration(chat_id, text)
@@ -851,9 +856,6 @@ def handle_text(chat_id, user_name, username, text):
     if state == "manual_phone": return handle_manual_phone(chat_id, text)
     if state == "finding_master": return handle_find_master(chat_id, text)
     
-    if text == "🔙 Отмена":
-        States.clear(chat_id)
-        return TG.send(chat_id, "❌ Отменено", reply_markup=KBD.master_main() if master else KBD.client_main())
     if text == "👤 Я мастер": return TG.send(chat_id, "Вы уже зарегистрированы!", reply_markup=KBD.master_main()) if master and master.get("completed_onboarding") else register_master(chat_id, user_name, username)
     if text == "👥 Я клиент":
         if not client: DB.set("clients", str(chat_id), {"created_at": now().isoformat()})
@@ -883,7 +885,7 @@ def handle_text(chat_id, user_name, username, text):
     if text == "🚷 Чёрный список" and master: return show_blacklist(chat_id)
     if text == "📢 Свободные окна" and master: return show_free_slots(chat_id)
     if text == "🖼 Портфолио" and master: States.set(chat_id, {"state": "adding_portfolio"}); return TG.send(chat_id, "🖼 Отправьте фото.")
-    if text == "🔙 В меню" and master: return TG.send(chat_id, "Главное меню", reply_markup=KBD.master_main())
+    if text == "🔙 В меню" and master: States.clear(chat_id); return TG.send(chat_id, "Главное меню", reply_markup=KBD.master_main())
     if text == "📋 Мои записи": return handle_client_appointments(chat_id)
     if text == "🔍 Найти мастера": States.set(chat_id, {"state": "finding_master"}); return TG.send(chat_id, "🔍 Номер:", reply_markup=KBD.cancel())
     if text == "❓ Помощь": return TG.send(chat_id, "📖 *Помощь*\n\n📊 *Сегодня* — сводка\n📅 *Расписание* — записи\n➕ *Новая запись* — вручную\n👥 *Клиенты* — база\n🔗 *Моя ссылка* — клиентам\n⚙️ *Настройки* — услуги, часы" if master else "📖 *Помощь*\n\n📋 *Мои записи*\n🔗 *Записаться по ссылке*\n📤 *Поделиться ссылкой*\n🔍 *Найти мастера*")
@@ -902,7 +904,7 @@ def handle_callback(chat_id, data):
     if data == "restart_onboarding": return start_onboarding(chat_id)
     if data == "addservice": return start_add_service(chat_id)
     if data.startswith("delservice_"): return delete_service(chat_id, data.replace("delservice_",""))
-    if data == "settings_back": return TG.send(chat_id, "⚙️ *Настройки*", reply_markup=KBD.settings())
+    if data == "settings_back": States.clear(chat_id); return TG.send(chat_id, "⚙️ *Настройки*", reply_markup=KBD.settings())
     if data == "add_blacklist": return start_add_blacklist(chat_id)
     if data.startswith("remove_blacklist_"): return handle_remove_blacklist(chat_id, data.replace("remove_blacklist_",""))
     if data == "setall_weekdays": return handle_set_all_weekdays(chat_id)
