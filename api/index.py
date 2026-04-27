@@ -1,6 +1,6 @@
 """
 График.Про — бот для записи клиентов
-Версия: 3.2.6 (часовые пояса)
+Версия: 3.3 (фото + комментарий + подтверждение мастером + QR-код)
 """
 
 import os
@@ -24,7 +24,6 @@ FIRESTORE_URL = f"https://firestore.googleapis.com/v1/projects/{PROJECT_ID}/data
 DAYS_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 DAYS_SHORT = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-# Часовые пояса
 TIMEZONES = {
     "-1": "Калининград (UTC-1)", "0": "Москва (UTC+0)", "1": "Самара (UTC+1)",
     "2": "Екатеринбург (UTC+2)", "3": "Омск (UTC+3)", "4": "Красноярск (UTC+4)",
@@ -53,7 +52,6 @@ def validate_phone(phone):
     return clean if len(clean) >= 10 else None
 
 def get_local_time(chat_id):
-    """Возвращает локальное время для пользователя с учётом часового пояса"""
     master = DB.get("masters", str(chat_id))
     client = DB.get("clients", str(chat_id))
     tz_offset = 0
@@ -201,6 +199,17 @@ class TG:
             return None
     
     @staticmethod
+    def send_photo(chat_id, photo_url_or_id, caption=""):
+        try:
+            payload = {"chat_id": chat_id, "photo": photo_url_or_id}
+            if caption:
+                payload["caption"] = caption
+                payload["parse_mode"] = "Markdown"
+            return requests.post(f"{TELEGRAM_URL}/sendPhoto", json=payload, timeout=10).json()
+        except:
+            return None
+    
+    @staticmethod
     def answer_callback(callback_id, text=""):
         try:
             requests.post(f"{TELEGRAM_URL}/answerCallbackQuery", json={"callback_query_id": callback_id, "text": text}, timeout=5)
@@ -252,7 +261,7 @@ class Slots:
         appointments = DB.query("appointments", "master_id", "EQUAL", master_id)
         busy = []
         for a in appointments:
-            if a.get("date") == date_str and a.get("status") != "cancelled":
+            if a.get("date") == date_str and a.get("status") not in ["cancelled", "rejected"]:
                 start = parse_time(a.get("time", "00:00"))
                 svc = next((s for s in master.get("services", []) if isinstance(s, dict) and s.get("name") == a.get("service")), None)
                 busy.append((start, start + (svc.get("duration", 60) if svc else 60)))
@@ -290,9 +299,11 @@ def get_today_summary(chat_id):
     apps = DB.query("appointments", "master_id", "EQUAL", str(chat_id))
     master = DB.get("masters", str(chat_id))
     svcs = master.get("services", []) if master else []
-    today_apps = [a for a in apps if a.get("date") == today and a.get("status") != "cancelled"]
+    today_apps = [a for a in apps if a.get("date") == today and a.get("status") == "confirmed"]
     total = sum(next((s.get("price",0) for s in svcs if isinstance(s, dict) and s.get("name") == a.get("service")), 0) for a in today_apps)
-    return f"📊 *Сегодня:* {len(today_apps)} зап, {total}₽" if today_apps else f"📊 *Сегодня:* выходной или нет записей"
+    pending_apps = [a for a in apps if a.get("status") == "pending"]
+    pending_text = f"\n⏳ Ожидают подтверждения: {len(pending_apps)}" if pending_apps else ""
+    return f"📊 *Сегодня:* {len(today_apps)} зап, {total}₽{pending_text}" if today_apps else f"📊 *Сегодня:* выходной или нет записей{pending_text}"
 
 def handle_start(chat_id, user_name):
     master = DB.get("masters", str(chat_id))
@@ -355,14 +366,27 @@ def finish_onboarding(chat_id):
     DB.set("masters", str(chat_id), {"completed_onboarding": True, "onboarding_step": 0})
     States.clear(chat_id)
     TG.send(chat_id, "🎉 *Готово!*", reply_markup=KBD.master_main())
-    show_master_link(chat_id)
+    show_master_link_v33(chat_id)
 
-def show_master_link(chat_id):
-    if not DB.get("masters", str(chat_id)): return TG.send(chat_id, "❌ Зарегистрируйтесь.")
+# ========== QR-КОД ДЛЯ ССЫЛКИ v3.3 ==========
+
+def generate_qr_and_send(chat_id, link):
+    try:
+        qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={link}"
+        TG.send_photo(chat_id, qr_url, caption=f"🔗 *Ваша ссылка для клиентов:*\n`{link}`\n\n📱 Наведите камеру на QR-код для быстрого перехода.")
+    except Exception as e:
+        print(f"QR error: {e}")
+        TG.send(chat_id, f"🔗 *Ваша ссылка:*\n`{link}`")
+
+def show_master_link_v33(chat_id):
+    if not DB.get("masters", str(chat_id)):
+        return TG.send(chat_id, "❌ Зарегистрируйтесь через /start")
     links = DB.query("links", "master_id", "EQUAL", str(chat_id))
     link_id = links[0]["_id"] if links else str(uuid.uuid4())[:8]
-    if not links: DB.set("links", link_id, {"master_id": str(chat_id)})
-    TG.send(chat_id, f"🔗 *Ваша ссылка:*\n`https://t.me/grafikpro_bot?start=master_{link_id}`")
+    if not links:
+        DB.set("links", link_id, {"master_id": str(chat_id)})
+    link = f"https://t.me/grafikpro_bot?start=master_{link_id}"
+    generate_qr_and_send(chat_id, link)
 
 def show_timezone_settings(chat_id):
     master = DB.get("masters", str(chat_id))
@@ -521,6 +545,8 @@ def handle_remove_blacklist(chat_id, phone):
         DB.set("masters", str(chat_id), {"blacklist": [b for b in master.get("blacklist", []) if b.get("phone") != phone]})
     show_blacklist(chat_id)
 
+# ========== НОВЫЙ ПРОЦЕСС ЗАПИСИ ДЛЯ v3.3 ==========
+
 def handle_client_booking_start(chat_id, link_id):
     if not DB.get("clients", str(chat_id)): DB.set("clients", str(chat_id), {"created_at": now().isoformat()})
     link = DB.get("links", link_id)
@@ -573,44 +599,145 @@ def handle_booking_time(chat_id, time_str):
         f"⏰ Время: *{time_str}*\n\n"
         f"Всё верно?",
         reply_markup={"inline_keyboard": [
-            [{"text": "✅ Подтвердить", "callback_data": f"bkconfirm_{time_str}"}],
+            [{"text": "✅ Да, всё верно", "callback_data": f"bkconfirm_{time_str}"}],
             [{"text": "🔄 Выбрать другое время", "callback_data": f"bkservice_{s.get('service','')}"}],
             [{"text": "🔙 Отмена", "callback_data": "booking_cancel"}]
         ]})
 
-def handle_booking_confirm(chat_id, time_str):
+def handle_booking_confirm_v33(chat_id, time_str):
     s = States.get(chat_id)
-    if not s: return TG.send(chat_id, "❌ Сессия истекла.")
+    if not s or s.get("state") != "booking_confirm":
+        return TG.send(chat_id, "❌ Сессия истекла. Начните заново по ссылке мастера.")
     s["time"] = time_str
+    s["state"] = "booking_photo"
+    States.set(chat_id, s)
+    TG.send(chat_id, "📸 *Отправьте фото (опционально)*\n\nМожете пропустить, нажав «⏩ Пропустить»",
+            reply_markup={"inline_keyboard": [[{"text": "⏩ Пропустить", "callback_data": "booking_skip_photo"}]]})
+
+def handle_booking_photo(chat_id, file_id=None):
+    s = States.get(chat_id)
+    if not s:
+        return TG.send(chat_id, "❌ Сессия истекла.")
+    if file_id:
+        s["client_photo"] = file_id
+    s["state"] = "booking_comment"
+    States.set(chat_id, s)
+    TG.send(chat_id, "💬 *Комментарий (опционально)*\n\nНапишите пожелания или вопросы к мастеру.\n\nМожете пропустить, нажав «⏩ Пропустить»",
+            reply_markup={"inline_keyboard": [[{"text": "⏩ Пропустить", "callback_data": "booking_skip_comment"}]]})
+
+def handle_booking_comment(chat_id, comment=None):
+    s = States.get(chat_id)
+    if not s:
+        return TG.send(chat_id, "❌ Сессия истекла.")
+    if comment:
+        s["client_comment"] = comment.strip()
     s["state"] = "booking_name"
     States.set(chat_id, s)
-    TG.send(chat_id, "📝 Ваше имя:", reply_markup=KBD.cancel())
+    TG.send(chat_id, "📝 *Ваше имя:*", reply_markup=KBD.cancel())
 
-def handle_booking_name(chat_id, name):
+def handle_booking_name_v33(chat_id, name):
     name = name.strip()
-    if len(name) < 2: return TG.send(chat_id, "❌ Минимум 2 символа.")
+    if len(name) < 2:
+        return TG.send(chat_id, "❌ Минимум 2 символа.")
     s = States.get(chat_id)
-    s["client_name"], s["state"] = name, "booking_phone"
+    if not s:
+        return TG.send(chat_id, "❌ Сессия истекла.")
+    s["client_name"] = name
+    s["state"] = "booking_phone"
     States.set(chat_id, s)
-    TG.send(chat_id, "📞 Телефон:", reply_markup=KBD.cancel())
+    TG.send(chat_id, "📞 *Телефон:*", reply_markup=KBD.cancel())
 
-def handle_booking_phone(chat_id, phone):
+def handle_booking_phone_v33(chat_id, phone):
     phone = validate_phone(phone)
-    if not phone: return TG.send(chat_id, "❌ Неверный формат.")
+    if not phone:
+        return TG.send(chat_id, "❌ Неверный формат телефона.")
     s = States.get(chat_id)
-    if not s: return TG.send(chat_id, "❌ Сессия истекла. Попробуйте снова по ссылке мастера.")
-    mid = s.get("master_id")
-    if not mid: return TG.send(chat_id, "❌ Мастер не найден.")
-    master = DB.get("masters", mid)
-    if not master: return TG.send(chat_id, "❌ Мастер не найден.")
-    if any(b.get("phone") == phone for b in master.get("blacklist", [])): return TG.send(chat_id, "❌ Запись невозможна.", reply_markup=KBD.client_main())
-    doc_id = DB.add("appointments", {"master_id": mid, "client_id": str(chat_id), "client_name": s["client_name"], "client_phone": phone, "service": s["service"], "date": s["date"], "time": s["time"], "status": "confirmed", "reminded_24h": False, "reminded_3h": False, "reminded_1h": False, "created_at": now().isoformat()})
-    if not doc_id: return TG.send(chat_id, "❌ Ошибка.", reply_markup=KBD.client_main())
+    if not s:
+        return TG.send(chat_id, "❌ Сессия истекла.")
+    master_id = s.get("master_id")
+    if not master_id:
+        return TG.send(chat_id, "❌ Мастер не найден.")
+    master = DB.get("masters", master_id)
+    if not master:
+        return TG.send(chat_id, "❌ Мастер не найден.")
+    if any(b.get("phone") == phone for b in master.get("blacklist", [])):
+        return TG.send(chat_id, "❌ Вы в чёрном списке мастера. Запись невозможна.", reply_markup=KBD.client_main())
+    doc_id = DB.add("appointments", {
+        "master_id": master_id,
+        "client_id": str(chat_id),
+        "client_name": s["client_name"],
+        "client_phone": phone,
+        "service": s["service"],
+        "date": s["date"],
+        "time": s["time"],
+        "status": "pending",
+        "client_photo": s.get("client_photo", ""),
+        "client_comment": s.get("client_comment", ""),
+        "reminded_24h": False,
+        "reminded_3h": False,
+        "reminded_1h": False,
+        "created_at": now().isoformat()
+    })
+    if not doc_id:
+        return TG.send(chat_id, "❌ Ошибка при создании заявки.", reply_markup=KBD.client_main())
     States.clear(chat_id)
-    cf = f"✅ *Запись подтверждена!*\n\n👤 {master.get('name','')}\n💈 {s['service']}\n📅 {s['date']} в {s['time']}"
-    if s.get("master_addr"): cf += f"\n📍 {s['master_addr']}"
-    TG.send(chat_id, cf + f"\n\n📞 {phone}", reply_markup=KBD.client_main())
-    TG.send(int(mid), f"🔔 *Новая запись!*\n👤 {s['client_name']}\n📞 {phone}\n💈 {s['service']}\n📅 {s['date']} в {s['time']}", reply_markup={"inline_keyboard": [[{"text": "👤 Клиент", "callback_data": f"client_card_{phone}"}], [{"text": "📅 Расписание", "callback_data": "schedule_filter_today"}]]})
+    TG.send(chat_id, 
+            f"⏳ *Заявка отправлена мастеру!*\n\n"
+            f"👤 {master.get('name', 'Мастер')}\n"
+            f"💈 {s['service']}\n"
+            f"📅 {s['date']} в {s['time']}\n\n"
+            f"✅ Мастер подтвердит запись в ближайшее время.",
+            reply_markup=KBD.client_main())
+    text = f"🔔 *НОВАЯ ЗАЯВКА!* (ожидает подтверждения)\n\n"
+    text += f"👤 *{s['client_name']}*\n"
+    text += f"📞 `{phone}`\n"
+    text += f"💈 {s['service']}\n"
+    text += f"📅 {s['date']} в {s['time']}\n"
+    if s.get("client_comment"):
+        text += f"\n💬 *Комментарий:* {s['client_comment']}\n"
+    buttons = [
+        [{"text": "✅ ПОДТВЕРДИТЬ", "callback_data": f"approve_{doc_id}"}],
+        [{"text": "💬 НАПИСАТЬ КЛИЕНТУ", "url": f"tg://user?id={chat_id}"}],
+        [{"text": "❌ ОТКЛОНИТЬ", "callback_data": f"reject_{doc_id}"}]
+    ]
+    TG.send(int(master_id), text, reply_markup={"inline_keyboard": buttons})
+    if s.get("client_photo"):
+        TG.send_photo(int(master_id), s["client_photo"], caption="📸 Фото от клиента")
+
+def handle_approve_appointment(chat_id, appt_id):
+    appt = DB.get("appointments", appt_id)
+    if not appt:
+        return TG.send(chat_id, "❌ Заявка не найдена.")
+    if appt.get("status") != "pending":
+        return TG.send(chat_id, "❌ Эта заявка уже обработана.")
+    DB.set("appointments", appt_id, {"status": "confirmed"})
+    if appt.get("client_id") and appt["client_id"] != "manual":
+        TG.send(int(appt["client_id"]),
+                f"✅ *Запись подтверждена!*\n\n"
+                f"👤 {appt.get('client_name')}\n"
+                f"💈 {appt.get('service')}\n"
+                f"📅 {appt.get('date')} в {appt.get('time')}\n\n"
+                f"Ждём вас!",
+                reply_markup=KBD.client_main())
+    TG.send(chat_id, f"✅ Заявка подтверждена!\n\n{appt.get('client_name')} — {appt.get('service')} на {appt.get('date')} в {appt.get('time')}",
+            reply_markup=KBD.master_main())
+
+def handle_reject_appointment(chat_id, appt_id):
+    appt = DB.get("appointments", appt_id)
+    if not appt:
+        return TG.send(chat_id, "❌ Заявка не найдена.")
+    if appt.get("status") != "pending":
+        return TG.send(chat_id, "❌ Эта заявка уже обработана.")
+    DB.set("appointments", appt_id, {"status": "rejected"})
+    if appt.get("client_id") and appt["client_id"] != "manual":
+        TG.send(int(appt["client_id"]),
+                f"❌ *Заявка отклонена мастером*\n\n"
+                f"💈 {appt.get('service')}\n"
+                f"📅 {appt.get('date')} в {appt.get('time')}\n\n"
+                f"Попробуйте выбрать другое время или свяжитесь с мастером напрямую.",
+                reply_markup=KBD.client_main())
+    TG.send(chat_id, f"❌ Заявка отклонена.\n\n{appt.get('client_name')} — {appt.get('service')}",
+            reply_markup=KBD.master_main())
 
 def start_manual_booking(chat_id):
     States.set(chat_id, {"state": "manual_name"})
@@ -666,7 +793,7 @@ def show_schedule(chat_id, mode="all"):
     if mode == "today": apps = [a for a in apps if a.get("date") == today]
     elif mode == "tomorrow": apps = [a for a in apps if a.get("date") == tomorrow]
     elif mode == "week": apps = [a for a in apps if today <= a.get("date","") <= week_end]
-    apps = [a for a in apps if a.get("status") != "cancelled"]
+    apps = [a for a in apps if a.get("status") not in ["cancelled", "rejected"]]
     apps.sort(key=lambda a: (a.get("date",""), a.get("time","")))
     if not apps: return TG.send(chat_id, "📭 Нет записей.")
     master = DB.get("masters", str(chat_id))
@@ -674,7 +801,7 @@ def show_schedule(chat_id, mode="all"):
     text = "📅 *Расписание:*\n"
     buttons = []
     for a in apps[:15]:
-        icon = {"confirmed":"🟡","completed":"✅","no_show":"❌"}.get(a.get("status"),"")
+        icon = {"confirmed":"🟡","completed":"✅","no_show":"❌","pending":"⏳"}.get(a.get("status"),"")
         svc = next((s for s in svcs if isinstance(s, dict) and s.get("name") == a.get("service")), None)
         dur = svc.get("duration", 60) if svc else 60
         end_time = format_time(parse_time(a.get("time","00:00")) + dur)
@@ -691,11 +818,12 @@ def show_dashboard(chat_id):
     today, apps = today_str(), DB.query("appointments", "master_id", "EQUAL", str(chat_id))
     master = DB.get("masters", str(chat_id))
     svcs = master.get("services", []) if master else []
-    ta = [a for a in apps if a.get("date") == today and a.get("status") != "cancelled"]
+    ta = [a for a in apps if a.get("date") == today and a.get("status") == "confirmed"]
     mc = [a for a in apps if a.get("status") == "completed" and a.get("date","") >= (now()-timedelta(days=30)).strftime("%Y-%m-%d")]
+    pending = [a for a in apps if a.get("status") == "pending"]
     total_today = sum(next((s.get("price",0) for s in svcs if isinstance(s, dict) and s.get("name") == a.get("service")), 0) for a in ta)
     total_month = sum(next((s.get("price",0) for s in svcs if isinstance(s, dict) and s.get("name") == a.get("service")), 0) for a in mc)
-    TG.send(chat_id, f"📊 *Дашборд*\n\n📅 Сегодня: {len(ta)} зап, {total_today}₽\n📆 За 30 дней: {len(mc)} вып, {total_month}₽", reply_markup=KBD.master_main())
+    TG.send(chat_id, f"📊 *Дашборд*\n\n📅 Сегодня: {len(ta)} зап, {total_today}₽\n⏳ Ожидают: {len(pending)}\n📆 За 30 дней: {len(mc)} вып, {total_month}₽", reply_markup=KBD.master_main())
 
 def show_clients(chat_id):
     apps = DB.query("appointments", "master_id", "EQUAL", str(chat_id))
@@ -724,7 +852,7 @@ def show_client_card(chat_id, phone):
     if note: text += f"📝 {note}\n"
     text += f"\n📊 Визитов: {total}\n\n📋 *История:*\n"
     for a in sorted(apps, key=lambda x: x.get("date",""), reverse=True)[:10]:
-        icon = {"confirmed":"🟡","completed":"✅","no_show":"❌","cancelled":"🗑"}.get(a.get("status"),"")
+        icon = {"confirmed":"🟡","completed":"✅","no_show":"❌","cancelled":"🗑","pending":"⏳","rejected":"❌"}.get(a.get("status"),"")
         text += f"{icon} {a.get('date')} — {a.get('service')}\n"
     buttons = [[{"text": "📝 Заметка", "callback_data": f"add_note_{phone}"}], [{"text": "🏷 Теги", "callback_data": f"edit_tags_{phone}"}], [{"text": "💬 Написать", "url": f"tg://resolve?phone={phone}"}], [{"text": "📞 Позвонить", "url": f"tel:{phone}"}]]
     TG.send(chat_id, text, reply_markup={"inline_keyboard": buttons})
@@ -743,7 +871,7 @@ def show_free_slots_day(chat_id, date_str):
 
 def handle_client_appointments(chat_id):
     apps = DB.query("appointments", "client_id", "EQUAL", str(chat_id))
-    active = [a for a in apps if a.get("status") != "cancelled"]
+    active = [a for a in apps if a.get("status") not in ["cancelled", "rejected"]]
     if not active: return TG.send(chat_id, "📋 Нет записей.")
     active.sort(key=lambda a: (a.get("date",""), a.get("time","")))
     master_cache = {}
@@ -755,8 +883,11 @@ def handle_client_appointments(chat_id):
         master = master_cache[mid]
         mn = master.get("name","Мастер") if master else "Мастер"
         addr = master.get("address","") if master else ""
-        text += f"\n• {a.get('date')} в {a.get('time')}\n  {a.get('service')} у {mn}"
+        status_icon = "⏳" if a.get("status") == "pending" else "✅" if a.get("status") == "confirmed" else ""
+        text += f"\n{status_icon} • {a.get('date')} в {a.get('time')}\n  {a.get('service')} у {mn}"
         if addr: text += f"\n  📍 {addr}"
+        if a.get("status") == "pending":
+            text += f"\n  ⏳ *Ожидает подтверждения мастера*"
         if a.get("status") == "confirmed":
             buttons.append([{"text": f"🔄 Перенести: {a.get('date')} {a.get('time')}", "callback_data": f"cl_reschedule_{a['_id']}"}])
             buttons.append([{"text": f"❌ Отменить: {a.get('date')} {a.get('time')}", "callback_data": f"cancel_{a['_id']}"}])
@@ -778,7 +909,7 @@ def handle_client_reschedule_date(chat_id, appt_id, date):
     TG.send(chat_id, f"⏰ Время на {date}:", reply_markup={"inline_keyboard": [[{"text": f"🟢 {t}", "callback_data": f"cl_res_time_{appt_id}_{date}_{t}"}] for t in free]})
 
 def handle_client_reschedule_time(chat_id, appt_id, date, time):
-    DB.set("appointments", appt_id, {"date": date, "time": time, "reminded_24h": False, "reminded_3h": False, "reminded_1h": False})
+    DB.set("appointments", appt_id, {"date": date, "time": time, "status": "confirmed", "reminded_24h": False, "reminded_3h": False, "reminded_1h": False})
     a = DB.get("appointments", appt_id)
     TG.send(int(a["master_id"]), f"🔄 *Перенос!*\n{a.get('client_name')}\n{a.get('service')}\nНовое: {date} в {time}")
     States.clear(chat_id)
@@ -875,8 +1006,8 @@ def handle_text(chat_id, user_name, username, text):
     if state == "setting_day": return handle_set_day_value(chat_id, sd.get("day_key",""), text)
     if state == "setting_all_weekdays": return handle_set_all_weekdays_value(chat_id, text)
     if state == "onboarding_address": DB.set("masters", str(chat_id), {"address": text.strip()}); States.clear(chat_id); TG.send(chat_id, "✅ Адрес сохранён!"); return onboarding_step_4(chat_id)
-    if state == "booking_name": return handle_booking_name(chat_id, text)
-    if state == "booking_phone": return handle_booking_phone(chat_id, text)
+    if state == "booking_name": return handle_booking_name_v33(chat_id, text)
+    if state == "booking_phone": return handle_booking_phone_v33(chat_id, text)
     if state == "entering_master_link": return handle_enter_master_link(chat_id, text)
     if state == "adding_note":
         phone = sd.get("note_phone","")
@@ -886,6 +1017,8 @@ def handle_text(chat_id, user_name, username, text):
         DB.set("masters", str(chat_id), {"client_notes": notes})
         States.clear(chat_id)
         return TG.send(chat_id, "✅ Заметка сохранена!", reply_markup=KBD.master_main())
+    if state == "booking_comment":
+        return handle_booking_comment(chat_id, text)
     if state == "onboarding_services":
         if len(text.strip()) < 2: return TG.send(chat_id, "❌ Короткое название")
         States.set(chat_id, {"state": "onboarding_service_price", "svc_name": text.strip()})
@@ -928,18 +1061,22 @@ def handle_text(chat_id, user_name, username, text):
         today = today_str()
         apps = DB.query("appointments", "master_id", "EQUAL", str(chat_id))
         svcs = master.get("services", [])
-        ta = [a for a in apps if a.get("date") == today and a.get("status") != "cancelled"]
+        ta = [a for a in apps if a.get("date") == today and a.get("status") == "confirmed"]
+        pending = [a for a in apps if a.get("date") == today and a.get("status") == "pending"]
         total = sum(next((s.get("price",0) for s in svcs if isinstance(s, dict) and s.get("name") == a.get("service")), 0) for a in ta)
-        text = f"📊 *Сегодня ({today}):*\n\n📅 Записей: {len(ta)}\n💰 Доход: {total}₽"
+        text = f"📊 *Сегодня ({today}):*\n\n📅 Записей: {len(ta)}\n💰 Доход: {total}₽\n⏳ Ожидают подтверждения: {len(pending)}"
         if ta:
-            text += "\n\n"
+            text += "\n\n*Подтверждённые:*\n"
             ta.sort(key=lambda a: a.get("time",""))
             for a in ta[:10]: text += f"• {a.get('time')} — {a.get('client_name','?')} ({a.get('service')})\n"
+        if pending:
+            text += "\n*Ожидают:*\n"
+            for a in pending[:5]: text += f"• {a.get('time')} — {a.get('client_name','?')} ({a.get('service')})\n"
         return TG.send(chat_id, text, reply_markup=KBD.master_main())
     if text == "📅 Расписание" and master: return show_schedule(chat_id)
     if text == "➕ Новая запись" and master: return start_manual_booking(chat_id)
     if text == "👥 Клиенты" and master: return show_clients(chat_id)
-    if text == "🔗 Моя ссылка" and master: return show_master_link(chat_id)
+    if text == "🔗 Моя ссылка" and master: return show_master_link_v33(chat_id)
     if text == "🔗 Записаться по ссылке": return handle_client_booking_by_link(chat_id)
     if text == "📤 Поделиться ссылкой": return handle_share_link(chat_id)
     if text == "⚙️ Настройки" and master: return TG.send(chat_id, "⚙️ *Настройки*", reply_markup=KBD.settings())
@@ -953,7 +1090,7 @@ def handle_text(chat_id, user_name, username, text):
     if text == "🔙 В меню" and master: States.clear(chat_id); return TG.send(chat_id, "Главное меню", reply_markup=KBD.master_main())
     if text == "📋 Мои записи": return handle_client_appointments(chat_id)
     if text == "🔍 Найти мастера": States.set(chat_id, {"state": "finding_master"}); return TG.send(chat_id, "🔍 Номер:", reply_markup=KBD.cancel())
-    if text == "❓ Помощь": return TG.send(chat_id, "📖 *Помощь*\n\n📊 *Сегодня* — сводка\n📅 *Расписание* — записи\n➕ *Новая запись* — вручную\n👥 *Клиенты* — база\n🔗 *Моя ссылка* — клиентам\n⚙️ *Настройки* — услуги, часы\n🔄 *Я клиент/Я мастер* — сменить роль" if master else "📖 *Помощь*\n\n📋 *Мои записи*\n🔗 *Записаться по ссылке*\n📤 *Поделиться ссылкой*\n🔍 *Найти мастера*\n🔄 *Я мастер* — стать мастером")
+    if text == "❓ Помощь": return TG.send(chat_id, "📖 *Помощь*\n\n📊 *Сегодня* — сводка\n📅 *Расписание* — записи\n➕ *Новая запись* — вручную\n👥 *Клиенты* — база\n🔗 *Моя ссылка* — клиентам (с QR-кодом)\n⚙️ *Настройки* — услуги, часы\n🔄 *Я клиент/Я мастер* — сменить роль" if master else "📖 *Помощь*\n\n📋 *Мои записи*\n🔗 *Записаться по ссылке*\n📤 *Поделиться ссылкой*\n🔍 *Найти мастера*\n🔄 *Я мастер* — стать мастером")
 
 def handle_client_booking_by_link(chat_id):
     States.set(chat_id, {"state": "entering_master_link"})
@@ -1000,10 +1137,22 @@ def handle_callback(chat_id, data):
         svcs = States.get(chat_id).get("services", [])
         if not svcs: return TG.send(chat_id, "❌ Сессия истекла.")
         return TG.send(chat_id, "💈 Услуги:", reply_markup={"inline_keyboard": [[{"text": f"{s['name']} — {s['price']}₽", "callback_data": f"bkservice_{s['name']}"}] for s in svcs]})
+    if data == "booking_skip_photo":
+        handle_booking_photo(chat_id, None)
+        return
+    if data == "booking_skip_comment":
+        handle_booking_comment(chat_id, None)
+        return
     if data.startswith("bkservice_"): return handle_booking_service(chat_id, data.replace("bkservice_",""))
     if data.startswith("bkdate_"): return handle_booking_date(chat_id, data.replace("bkdate_",""))
     if data.startswith("bktime_"): return handle_booking_time(chat_id, data.replace("bktime_",""))
-    if data.startswith("bkconfirm_"): return handle_booking_confirm(chat_id, data.replace("bkconfirm_",""))
+    if data.startswith("bkconfirm_"): return handle_booking_confirm_v33(chat_id, data.replace("bkconfirm_",""))
+    if data.startswith("approve_"):
+        handle_approve_appointment(chat_id, data.replace("approve_",""))
+        return
+    if data.startswith("reject_"):
+        handle_reject_appointment(chat_id, data.replace("reject_",""))
+        return
     if data.startswith("manservice_"): return handle_manual_service(chat_id, data.replace("manservice_",""))
     if data.startswith("mandate_"): return handle_manual_date(chat_id, data.replace("mandate_",""))
     if data.startswith("mantime_"): return handle_manual_time(chat_id, data.replace("mantime_",""))
@@ -1083,7 +1232,8 @@ class handler(BaseHTTPRequestHandler):
             chat_id = str(msg["chat"]["id"])
             user_name = msg["from"].get("first_name", "Пользователь")
             if "photo" in msg:
-                if States.get(chat_id).get("state") == "adding_portfolio":
+                state = States.get(chat_id).get("state", "")
+                if state == "adding_portfolio":
                     master = DB.get("masters", str(chat_id))
                     portfolio = master.get("portfolio", []) if master else []
                     if len(portfolio) >= 5: TG.send(chat_id, "❌ Максимум 5 фото.")
@@ -1091,6 +1241,8 @@ class handler(BaseHTTPRequestHandler):
                         portfolio.append({"file_id": msg["photo"][-1]["file_id"], "caption": ""})
                         DB.set("masters", str(chat_id), {"portfolio": portfolio})
                         TG.send(chat_id, f"✅ Фото добавлено! ({len(portfolio)}/5)")
+                elif state == "booking_photo":
+                    handle_booking_photo(chat_id, msg["photo"][-1]["file_id"])
                 return
             text = msg.get("text", "")
             if text.startswith("/start"):
